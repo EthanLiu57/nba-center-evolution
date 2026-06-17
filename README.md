@@ -2,11 +2,13 @@
 
 An analysis of how the center position has changed since the introduction of the three-point line, using ANOVA, principal component analysis, hierarchical clustering, and ARIMA time series forecasting.
 
+**[View the full analysis](https://ethanliu57.github.io/nba-center-evolution/evolution_of_the_center.html)**
+
 ---
 
 ## Motivation
 
-The modern NBA center looks nothing like the centers of the 1980s and 1990s. Where Patrick Ewing and Hakeem Olajuwon defined success through interior dominance, today's centers, such as Nikola Jokić, Joel Embiid, and Karl-Anthony Towns, are expected to shoot from the perimeter, facilitate offense, and space the floor. But is this shift real and quantifiable, or more narrative than statistical reality?
+The modern NBA center looks nothing like the centers of the 1980s and 1990s. Where Patrick Ewing and Hakeem Olajuwon defined success through interior dominance, today's centers — Nikola Jokić, Joel Embiid, Karl-Anthony Towns — are expected to shoot from the perimeter, facilitate offense, and space the floor. But is this shift real and quantifiable, or more narrative than statistical reality?
 
 This project examines four decades of NBA center statistics to test whether the position has genuinely changed, identify distinct center archetypes across that period, and forecast where the position is headed.
 
@@ -47,11 +49,8 @@ ARIMA models fit to the yearly proportion of centers belonging to each cluster p
 
 ```
 ├── README.md
-├── evolution_of_the_center.Rmd   # Full analysis document
-└── screenshots/
-    ├── screenshot_clusters.png
-    ├── screenshot_arima.png
-    └── screenshot_boxplots.png
+├── evolution_of_the_center.Rmd    # R Markdown source
+└── evolution_of_the_center.html   # Rendered analysis (live at link above)
 ```
 
 ---
