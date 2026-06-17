@@ -1,0 +1,385 @@
+---
+title: "Evolution of the Center in the NBA"
+author: "Ethan Liu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Introduction
+
+The NBA has undergone a dramatic stylistic transformation over the past four decades. Nowhere is this more visible than at the center position. The centers of the 1980s and 1990s — physical, interior-oriented players who dominated through rebounding and post scoring — look almost nothing like the stretch bigs and floor spacers who populate rosters today. Where Patrick Ewing and Hakeem Olajuwon defined success through proximity to the basket, modern centers like Nikola Jokić and Karl-Anthony Towns are expected to facilitate offense from the perimeter and knock down three-pointers.
+
+This raises a natural question: is the change in the center position real and quantifiable, or is it more of a narrative than a statistical reality? And if it is real, how many distinct types of centers have existed across this era, and where is the position headed?
+
+This analysis uses season-level statistics from Basketball Reference to examine how the center position has evolved since 1980, using ANOVA to test for differences across eras, principal component analysis and hierarchical clustering to identify distinct center archetypes, and ARIMA time series forecasting to project where the position is heading.
+
+---
+
+## Data
+
+Data was sourced from [Basketball Reference](https://www.basketball-reference.com/), containing season averages for every NBA player since 1950. The dataset was filtered to include only players whose primary position was center (C, C-PF, PF-C, or SF-C), seasons from 1980 onward (coinciding with the introduction of the three-point line), and players who appeared in at least 40 games in a season to exclude small sample sizes.
+
+For players who were traded mid-season, only their combined `TOT` row was retained to avoid double-counting. Shooting percentage columns with missing values (typically due to zero attempts) were imputed with zero.
+
+```{r load-data}
+library(dplyr)
+library(ggplot2)
+library(factoextra)
+library(FactoMineR)
+library(cluster)
+library(forecast)
+
+# Load data — place season_stats.csv in the same directory as this file
+data <- read.csv("season_stats.csv")
+
+# Filter to centers and forwards who primarily play center
+centers_raw <- data %>%
+  filter(Pos %in% c("C", "C-PF", "PF-C", "SF-C")) %>%
+  filter(Year >= 1980)
+
+# For traded players, keep only the TOT (combined) row
+centers_clean <- centers_raw %>%
+  group_by(Player, Year) %>%
+  filter(Tm == "TOT" | n() == 1) %>%
+  ungroup()
+
+# Minimum games played filter
+centers_clean <- centers_clean %>% filter(G >= 40)
+
+# Impute missing shooting percentages with zero (no attempts)
+centers_clean <- centers_clean %>%
+  mutate(
+    X3P.  = ifelse(is.na(X3P.),  0, X3P.),
+    X2P.  = ifelse(is.na(X2P.),  0, X2P.),
+    FG.   = ifelse(is.na(FG.),   0, FG.),
+    eFG.  = ifelse(is.na(eFG.),  0, eFG.),
+    FT.   = ifelse(is.na(FT.),   0, FT.),
+    TS.   = ifelse(is.na(TS.),   0, TS.),
+    X3PAr = ifelse(is.na(X3PAr), 0, X3PAr),
+    FTr   = ifelse(is.na(FTr),   0, FTr),
+    TOV.  = ifelse(is.na(TOV.),  0, TOV.)
+  )
+
+# Assign decade labels
+centers_clean <- centers_clean %>%
+  mutate(Decade = case_when(
+    Year < 1990 ~ "1980s",
+    Year < 2000 ~ "1990s",
+    Year < 2010 ~ "2000s",
+    TRUE        ~ "2010s+"
+  ))
+
+# Derive assists per 36 minutes
+centers_clean <- centers_clean %>%
+  mutate(AP36 = (AST / MP) * 36)
+
+cat("Total player-seasons:", nrow(centers_clean), "\n")
+cat("Years covered:", min(centers_clean$Year), "to", max(centers_clean$Year), "\n")
+```
+
+---
+
+## Era Comparisons
+
+Before turning to multivariate methods, it is worth asking whether centers from different eras are meaningfully different on individual statistics. The following analyses use one-way ANOVA to test for differences in means across decades, with Tukey HSD post-hoc comparisons to identify which specific eras differ.
+
+### Three-Point Attempts
+
+The three-point line was introduced to the NBA in 1979, but centers largely ignored it for decades. The question is whether the current era represents a genuine shift in how centers are used offensively from the perimeter.
+
+```{r anova-3pa}
+boxplot(X3PA ~ Decade, data = centers_clean,
+        main = "Three-Point Attempts by Decade",
+        xlab = "Decade", ylab = "3PA per Season",
+        col = c("steelblue", "steelblue3", "steelblue4", "dodgerblue"),
+        outline = FALSE)
+
+anova_3pa <- aov(X3PA ~ Decade, data = centers_clean)
+summary(anova_3pa)
+TukeyHSD(anova_3pa)
+```
+
+Tukey HSD confirms that the 2010s+ era is significantly different from all prior decades in three-point attempts, while differences among the 1980s, 1990s, and 2000s are comparatively modest. The shift is concentrated in the most recent era.
+
+### Assists Per 36 Minutes
+
+The modern center is expected to be a playmaker, not just a finisher. Assists per 36 minutes normalizes for playing time and allows fair comparison across eras.
+
+```{r anova-assists}
+boxplot(AP36 ~ Decade, data = centers_clean,
+        main = "Assists Per 36 Minutes by Decade",
+        xlab = "Decade", ylab = "Assists per 36 min",
+        col = c("steelblue", "steelblue3", "steelblue4", "dodgerblue"),
+        outline = FALSE)
+
+anova_ast <- aov(AP36 ~ Decade, data = centers_clean)
+summary(anova_ast)
+TukeyHSD(anova_ast)
+```
+
+The 2010s+ era shows significantly higher assists per 36 minutes than all previous decades, consistent with the league-wide emphasis on playmaking from the center position. The 1980s and 1990s are not significantly different from each other, suggesting the playmaking shift is recent rather than gradual.
+
+### Defensive Win Shares
+
+If offensive responsibilities have expanded, has defensive production changed correspondingly? Defensive Win Shares captures a player's estimated contribution to team wins through defense.
+
+```{r anova-dws}
+boxplot(DWS ~ Decade, data = centers_clean,
+        main = "Defensive Win Shares by Decade",
+        xlab = "Decade", ylab = "Defensive Win Shares",
+        col = c("steelblue", "steelblue3", "steelblue4", "dodgerblue"),
+        outline = FALSE)
+
+anova_dws <- aov(DWS ~ Decade, data = centers_clean)
+summary(anova_dws)
+TukeyHSD(anova_dws)
+```
+
+Defensive win shares differ significantly across decades, though the direction of the trend is worth noting: if defensive production has declined in the current era despite increased offensive responsibilities, that suggests a genuine tradeoff in how modern centers are deployed.
+
+### Total Rebounds
+
+Rebounding has historically been the defining statistic for centers. Has the modern emphasis on perimeter play come at the cost of rebounding dominance?
+
+```{r anova-reb}
+boxplot(TRB ~ Decade, data = centers_clean,
+        main = "Total Rebounds by Decade",
+        xlab = "Decade", ylab = "Total Rebounds per Season",
+        col = c("steelblue", "steelblue3", "steelblue4", "dodgerblue"),
+        outline = FALSE)
+
+anova_reb <- aov(TRB ~ Decade, data = centers_clean)
+summary(anova_reb)
+TukeyHSD(anova_reb)
+```
+
+Rebounding differences across decades are worth interpreting carefully alongside the three-point and assists results — if rebounding has declined alongside increased perimeter responsibilities, that is evidence of a genuine positional tradeoff rather than simply an expansion of the center's role.
+
+---
+
+## Principal Component Analysis
+
+With over 40 statistical columns in the dataset, directly clustering on all variables would be noisy and computationally unstable. Principal component analysis reduces the dimensionality of the data by finding linear combinations of the original variables — principal components — that capture the most variance with the fewest dimensions.
+
+```{r pca}
+# Select numerical columns for analysis
+numerical_data <- centers_clean %>%
+  select(Year, G, MP, starts_with("X3"), starts_with("X2"),
+         FG., eFG., FT., TS., FTr, X3PAr, TOV.,
+         AST, TRB, ORB, DRB, STL, BLK, TOV, PF, PTS,
+         PER, OWS, DWS, WS, BPM, VORP, AP36)
+
+# Run PCA with FactoMineR (integrates cleanly with clustering)
+data.pca <- PCA(numerical_data, ncp = 6, graph = FALSE)
+
+# Variance explained
+fviz_eig(data.pca, addlabels = TRUE, ylim = c(0, 50),
+         main = "Variance Explained by Principal Component")
+
+# Show cumulative variance for first 6 components
+data.pca$eig[1:6, ]
+```
+
+Six principal components were retained, explaining over 75% of the total variance in the dataset. The components have interpretable structure:
+
+- **Component 2** loads heavily on scoring efficiency metrics (FG%, eFG%, True Shooting) — a *scoring efficiency* dimension
+- **Component 3** loads on three-point attempts and three-point percentage — a *perimeter shooting* dimension  
+- **Component 4** loads on blocks, steals, and defensive win shares — a *defensive* dimension
+- **Component 5** captures rebounding volume
+- **Component 6** mixes interior defense and perimeter shooting
+
+```{r pca-loadings}
+# Display loadings for interpretation
+data.pca$var$coord[, 1:6]
+```
+
+---
+
+## Hierarchical Clustering
+
+With the principal components in hand, hierarchical clustering was used to identify distinct center archetypes. Unlike k-means, hierarchical clustering does not require pre-specifying the number of clusters, instead building a full hierarchy that can be cut at any level. Ward's criterion was used, which minimizes within-cluster variance and is well-suited to PCA-derived inputs.
+
+The `HCPC` function from FactoMineR performs hierarchical clustering directly on PCA output, automatically determining the optimal cut point.
+
+```{r clustering}
+# Hierarchical clustering on PCA components
+res.hcpc <- HCPC(data.pca, graph = FALSE)
+
+# Cluster dendrogram
+fviz_dend(res.hcpc,
+          cex = 0.5,
+          palette = "jco",
+          rect = TRUE, rect_fill = TRUE,
+          rect_border = "jco",
+          main = "Hierarchical Clustering Dendrogram")
+
+# Cluster map on first two principal components
+fviz_cluster(res.hcpc,
+             repel = FALSE,
+             geom = "point",
+             pointsize = 1.5,
+             show.clust.cent = TRUE,
+             palette = "jco",
+             ggtheme = theme_minimal(),
+             main = "Center Archetypes — PCA Factor Map")
+```
+
+```{r cluster-description}
+# Variable contributions to each cluster
+res.hcpc$desc.var$quanti
+
+# Which principal components define each cluster
+res.hcpc$desc.axes$quanti
+
+# Cluster membership counts
+table(res.hcpc$data.clust$clust)
+
+# Add cluster assignments back to the main dataset
+centers_clean$Cluster <- res.hcpc$data.clust$clust
+
+# Average year by cluster — shows temporal distribution
+centers_clean %>%
+  group_by(Cluster) %>%
+  summarise(
+    avg_year    = round(mean(Year), 1),
+    avg_3pa     = round(mean(X3PA), 2),
+    avg_trb     = round(mean(TRB), 1),
+    avg_blk     = round(mean(BLK), 1),
+    avg_pts     = round(mean(PTS), 1),
+    n           = n()
+  )
+```
+
+```{r cluster-temporal}
+# Proportion of each cluster by decade
+cluster_by_decade <- centers_clean %>%
+  group_by(Decade, Cluster) %>%
+  summarise(n = n()) %>%
+  group_by(Decade) %>%
+  mutate(prop = n / sum(n))
+
+ggplot(cluster_by_decade, aes(x = Decade, y = prop, fill = factor(Cluster))) +
+  geom_col(position = "stack") +
+  scale_fill_brewer(palette = "Set2", name = "Cluster") +
+  labs(title = "Cluster Composition by Decade",
+       x = "Decade", y = "Proportion of Centers") +
+  theme_minimal()
+```
+
+---
+
+## ARIMA Time Series Forecasting
+
+The cluster analysis established that the center position has shifted toward scoring and three-point shooting archetypes. But is this an ongoing trend, or has it already plateaued? Rather than forecasting raw statistics, we track the proportion of centers belonging to each archetype cluster per year, and fit ARIMA models to those proportions to project where the position composition is headed.
+
+```{r arima-setup}
+# Compute proportion of centers in each cluster per year
+cluster_props <- centers_clean %>%
+  group_by(Year, Cluster) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Year) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+```
+
+### Scoring Cluster (Cluster 2)
+
+The scoring-focused cluster — characterized by high field goal efficiency and above-average points — has grown substantially in recent years. Average year of membership: 2013.
+
+```{r arima-scoring}
+props_c2 <- cluster_props %>% filter(Cluster == 2)
+
+ts_c2 <- ts(props_c2$prop,
+            start = min(props_c2$Year),
+            end   = max(props_c2$Year),
+            frequency = 1)
+
+arima_c2 <- auto.arima(ts_c2)
+forecast_c2 <- forecast(arima_c2, h = 5)
+
+plot(forecast_c2,
+     main = "Forecast: Proportion of Centers in Scoring Cluster",
+     xlab = "Year", ylab = "Proportion")
+print(forecast_c2)
+```
+
+### Three-Point Shooting Cluster (Cluster 3)
+
+The three-point shooting cluster is the most recent archetype to emerge, with no members prior to 1989 and an average membership year of 2017.
+
+```{r arima-3pt}
+props_c3 <- cluster_props %>% filter(Cluster == 3)
+
+ts_c3 <- ts(props_c3$prop,
+            start = min(props_c3$Year),
+            end   = max(props_c3$Year),
+            frequency = 1)
+
+arima_c3 <- auto.arima(ts_c3)
+forecast_c3 <- forecast(arima_c3, h = 5)
+
+plot(forecast_c3,
+     main = "Forecast: Proportion of Centers in Three-Point Shooting Cluster",
+     xlab = "Year", ylab = "Proportion")
+print(forecast_c3)
+```
+
+### Defensive/Rebounding Cluster (Cluster 4)
+
+The traditional defensive and rebounding cluster, most prevalent in the 1980s, has been declining. The forecast projects whether this decline continues.
+
+```{r arima-defensive}
+props_c4 <- cluster_props %>% filter(Cluster == 4)
+
+ts_c4 <- ts(props_c4$prop,
+            start = min(props_c4$Year),
+            end   = max(props_c4$Year),
+            frequency = 1)
+
+arima_c4 <- auto.arima(ts_c4)
+forecast_c4 <- forecast(arima_c4, h = 5)
+
+plot(forecast_c4,
+     main = "Forecast: Proportion of Centers in Defensive/Rebounding Cluster",
+     xlab = "Year", ylab = "Proportion")
+print(forecast_c4)
+```
+
+---
+
+## Conclusions
+
+The statistical evidence confirms what the eye test suggests: the center position has undergone a genuine and significant transformation since 1980.
+
+The ANOVA results show that nearly every statistic differed significantly across decades, with three-point attempts and assists per 36 minutes rising substantially in the current era while traditional defensive metrics have shifted. The hierarchical clustering identified five distinct center archetypes, with scoring-focused and three-point shooting clusters now comprising the majority of the league, and the traditional rebounding-dominant cluster increasingly rare in recent seasons.
+
+The ARIMA forecasts suggest that this shift has largely plateaued rather than continuing to accelerate — three-point attempt rates among centers appear to be flattening, suggesting the league may have reached a new equilibrium rather than continuing an ongoing trend.
+
+**Limitations and future directions:**
+
+- This analysis uses season averages, which may obscure within-season variation and role changes
+- Clustering on PCA components produces stable but sometimes hard-to-interpret archetypes; alternative methods (DBSCAN, Gaussian mixture models) could provide complementary insights
+- A Markov chain transition framework would allow examination of how individual players move between archetypes over their careers, which is a natural extension of this work
+- Examining how cluster membership correlates with team success would address the practical question of which type of center actually wins games
+
+---
+
+## Data and Reproducibility
+
+Data was downloaded from [Basketball Reference](https://www.basketball-reference.com/) season totals pages. To reproduce this analysis, download the season averages data and save it as `season_stats.csv` in the same directory as this `.Rmd` file.
+
+**Required packages:** `dplyr`, `ggplot2`, `factoextra`, `FactoMineR`, `cluster`, `forecast`
+
+Install all at once with:
+```r
+install.packages(c("dplyr", "ggplot2", "factoextra", "FactoMineR", "cluster", "forecast"))
+```
